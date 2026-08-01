@@ -37,6 +37,14 @@ STYLES = {
 # ══════════════════════════════════════════════
 CHARS_PER_SEC = 9.5
 
+# ⚠️ الحد الأقصى المسموح لتجاوز طول القسم عن الهدف المحسوب من duration_min.
+# ثبت عملياً (عبر جوبين اختباريين فعليين) أن النموذج قد يكتب نصاً يتراوح
+# طوله بين 88% و190% من الهدف المطلوب رغم التوجيه الصريح بعدم الاختصار —
+# وهذا يُضخّم مدة الحلقة النهائية كثيراً عن duration_min الذي طلبه المستخدم
+# (مثال فعلي: طلب 2 دقيقة → نتج فيديو ~5 دقائق). هذا السقف يمنع الانفلات
+# دون المساس بجودة السرد أو حذف تفاصيل أساسية من القسم.
+MAX_SECTION_OVERSHOOT_RATIO = 1.25
+
 
 class DocumentaryPipeline:
     # ⚠️ يُستخدم فقط في الطلبات التي تتطلب رداً بصيغة JSON (outline, scenes, seo, ideas)
@@ -398,6 +406,35 @@ class DocumentaryPipeline:
         t = re.sub(r'["\']\s*\}\s*$', "", t)
         return t.strip()
 
+    @staticmethod
+    def _truncate_to_target(text: str, target_chars: int, section_name: str = "",
+                             max_ratio: float = MAX_SECTION_OVERSHOOT_RATIO) -> str:
+        """
+        شبكة أمان أخيرة: تقصّ النص عند حدود جملة كاملة إن تجاوز الحد الأقصى
+        المسموح به من الهدف (max_ratio × target_chars)، بحيث لا تنفلت مدة
+        الحلقة النهائية عن duration_min الذي طلبه المستخدم حتى لو تجاهل
+        النموذج تعليمات الإيجاز الموجّهة له صريحاً في الـ prompt. يقصّ عند
+        نهاية أقرب جملة كاملة (لا يقطع في وسط جملة) للحفاظ على تماسك السرد.
+        """
+        text = (text or "").strip()
+        if not text or not target_chars:
+            return text
+        cap = int(target_chars * max_ratio)
+        if len(text) <= cap:
+            return text
+        sentences = re.split(r"(?<=[.!؟?])\s+", text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        kept = ""
+        for s in sentences:
+            candidate = f"{kept} {s}".strip()
+            if len(candidate) > cap and kept:
+                break
+            kept = candidate
+        result = kept or text[:cap]
+        log.warning(f"   ✂️ قسم '{section_name}': النص تجاوز الحد الأقصى المسموح "
+                    f"({len(text)}/{cap} حرف) — تم قصّه عند حدود جملة كاملة إلى {len(result)} حرف")
+        return result
+
     def _generate_section_text(self, topic, style, style_desc, section_name, section_num,
                                 duration_seconds, target_chars, prev_ending="",
                                 used_openings=None, max_attempts=4):
@@ -430,7 +467,12 @@ class DocumentaryPipeline:
 
         best_text = ""           # أطول نص تم توليده عبر كل المحاولات (احتياطي أخير)
         best_clean_text = ""     # أطول نص فصيح خالٍ من أي علامة عامية (الخيار المفضّل)
-        last_fail_reason = ""    # "short" | "similar" | "colloquial" — لتخصيص رسالة إعادة المحاولة
+        success_text = None      # ⚠️ أول نص حقق النجاح الكامل (طول ضمن النطاق [0.85–1.25] + فصيح
+                                  # + افتتاحية غير مكررة) — له الأولوية القصوى عند الإرجاع، لأن
+                                  # "أطول نص فصيح" (best_clean_text) قد يكون نصاً تجاوز الحد الأقصى
+                                  # في محاولة سابقة (overshoot) بينما محاولة لاحقة أنجح فعلياً ضمن
+                                  # النطاق المطلوب بالضبط — يجب عدم استبدالها بنص تجاوزي أطول.
+        last_fail_reason = ""    # "short" | "similar" | "colloquial" | "long" — لتخصيص رسالة إعادة المحاولة
         for attempt in range(1, max_attempts + 1):
             extra_push = ""
             if attempt > 1:
@@ -452,6 +494,13 @@ class DocumentaryPipeline:
                         "(كان محتوى غير ذي صلة). اكتب هذه المرة نصاً عربياً فصيحاً خالصاً يتحدث فقط "
                         f"عن \"{section_name}\" ضمن موضوع \"{topic}\" — بدون أي روابط أو نصوص بلغات أخرى."
                     )
+                elif last_fail_reason == "long":
+                    extra_push = (
+                        f"\n⚠️ محاولتك السابقة كانت أطول من المطلوب بكثير ({len(best_text)} حرف "
+                        f"من أصل {target_chars} مطلوب فقط). هذه المرة اكتب بإيجاز أكبر وركّز على "
+                        "أهم النقاط فقط دون حشو أو استطراد أو تفاصيل جانبية زائدة — لا تتجاوز "
+                        f"{int(target_chars * MAX_SECTION_OVERSHOOT_RATIO)} حرفاً كحد أقصى مطلقاً."
+                    )
                 else:
                     extra_push = (
                         "\n⚠️ محاولتك السابقة تضمّنت كلمات عامية/لهجة محلية وهذا ممنوع تماماً. "
@@ -462,7 +511,9 @@ class DocumentaryPipeline:
 هذا القسم هو: "{section_name}" (القسم رقم {section_num} من 6)
 الأسلوب: {style} — {style_desc}
 مدة هذا القسم عند النطق: {duration_seconds} ثانية بالضبط.
-⚠️ لذلك يجب أن يكون طول الكلام حوالي {target_chars} حرفاً بالعربية بالضبط (± 10%) — لا تكتب أقصر من ذلك أبداً.
+⚠️ لذلك يجب أن يكون طول الكلام حوالي {target_chars} حرفاً بالعربية بالضبط (± 10%) — لا تكتب أقصر من ذلك أبداً،
+ولا تكتب أطول من {int(target_chars * MAX_SECTION_OVERSHOOT_RATIO)} حرفاً كحد أقصى مطلقاً (الإيجاز المركّز مطلوب،
+وليس السرد المطوّل أو الاستطراد الجانبي) — الالتزام بالمدة الزمنية المطلوبة للحلقة كاملة أهم من إضافة تفاصيل زائدة.
 
 🎙️ مهم جداً — أسلوب الرواية:
 - تحدّث كإنسان حقيقي يروي الحدث مباشرة أمام الكاميرا، بعفوية وثقة، لا كمن يقرأ من ورقة.
@@ -517,24 +568,38 @@ class DocumentaryPipeline:
                     last_fail_reason = "similar"
                 elif ratio < 0.85:
                     last_fail_reason = "short"
+                elif ratio > MAX_SECTION_OVERSHOOT_RATIO:
+                    last_fail_reason = "long"
 
-                # النجاح الكامل: طول كافٍ + فصيح بالكامل + افتتاحية غير مكررة
-                if ratio >= 0.85 and not colloquial_hit and not similar_hit:
+                # النجاح الكامل: طول ضمن النطاق المقبول (لا قصير جداً ولا طويل جداً)
+                # + فصيح بالكامل + افتتاحية غير مكررة
+                if 0.85 <= ratio <= MAX_SECTION_OVERSHOOT_RATIO and not colloquial_hit and not similar_hit:
+                    success_text = text
                     break
             except Exception as e:
                 log.warning(f"   ⚠️ فشل توليد قسم '{section_name}' (محاولة {attempt}): {e}")
 
-        # الأولوية القصوى: نص فصيح خالٍ من العامية وقريب من الطول المطلوب
+        # ⚠️ أعلى أولوية مطلقة: محاولة نجحت بالكامل (طول ضمن النطاق + فصيح +
+        # افتتاحية غير مكررة) — تُستخدم كما هي فوراً دون أي حاجة للقص، لأنها
+        # بالتعريف ضمن الحد الأقصى المسموح أصلاً.
+        if success_text:
+            return success_text
+
+        # الأولوية التالية: نص فصيح خالٍ من العامية وقريب من الطول المطلوب
+        # ⚠️ شبكة أمان أخيرة في جميع مسارات الإرجاع: قصّ عند حدود جملة كاملة
+        # إن تجاوز النص المُختار الحد الأقصى المسموح، لضمان التزام مدة الحلقة
+        # النهائية بـ duration_min المطلوب بغض النظر عن سلوك النموذج.
         if best_clean_text and len(best_clean_text) >= target_chars * 0.6:
-            return best_clean_text
+            return self._truncate_to_target(best_clean_text, target_chars, section_name)
         if best_clean_text:
             log.warning(f"   ⚠️ قسم '{section_name}': أفضل نص فصيح متاح قصير نسبياً "
                         f"({len(best_clean_text)}/{target_chars}) — يُستخدم كأولوية على النص الأطول المحتوي على عامية")
-            return best_clean_text
+            return self._truncate_to_target(best_clean_text, target_chars, section_name)
         if best_text:
             log.warning(f"   ⚠️ قسم '{section_name}': لم يُعثر على نص فصيح خالٍ من العامية بالكامل "
                         f"بعد {max_attempts} محاولات — استخدام أطول نص متاح (قد يحتوي عامية)")
-        return best_text or f"في هذا الجزء، نتحدث عن {topic}."
+            return self._truncate_to_target(best_text, target_chars, section_name)
+        return f"في هذا الجزء، نتحدث عن {topic}."
 
     @staticmethod
     def _normalize_script(data):
