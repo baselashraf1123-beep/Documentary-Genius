@@ -1,0 +1,26 @@
+# --- Sensitive / session-specific files ---
+cookies.txt
+*.db
+production.db
+
+# --- Logs ---
+server.log
+*.log
+
+# --- Python cache ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Generated production output (large media files, regenerated per run) ---
+output/
+
+# --- Environment ---
+.env
+venv/
+.venv/
+
+# --- OS/editor junk ---
+.DS_Store
+.vscode/
+.idea/
