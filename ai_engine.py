@@ -10,11 +10,42 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeoutError
 
 from g4f.client import Client
 import g4f.Provider as _Providers
 
 log = logging.getLogger("🤖")
+
+# ⚠️ اكتُشف فعلياً بالاختبار المباشر (جوب إنتاج حي بمدة 5 دقائق، قسم "الخاتمة"):
+# معامل timeout=90 الممرَّر لـ g4f.chat.completions.create() لا يُطبَّق فعلياً
+# بشكل موثوق من طرف كل مزود داخل RetryProvider (تحديداً llama-3.3-70b) — العملية
+# دخلت في "sleep" فعلي (0.1% CPU) لأكثر من 10 دقائق متواصلة مع اتصالات شبكة
+# معلّقة (CLOSE_WAIT) دون أي رفع استثناء أو تسجيل في اللوج، أي أن الطلب كان
+# "معلَّقاً" حرفياً بلا أي مخرج، مما يجمّد خط الإنتاج كاملاً بلا أي مؤشر خطأ.
+# الحل: نغلّف كل استدعاء فعلي بـ ThreadPoolExecutor.result(timeout=...) ليكون
+# سقف الانتظار الفعلي مضموناً دائماً من طرفنا مباشرة، بغض النظر عن سلوك
+# المكتبة الداخلي — إن انقضى السقف نرفع TimeoutError ونتابع فوراً للنموذج
+# التالي في السلسلة (الخيط المعلّق نفسه يُترك ليموت مع خروج العملية، وهذا
+# مقبول تماماً لأنه IO-bound لا يستهلك أي CPU حقيقي أثناء تعليقه).
+_HARD_CALL_TIMEOUT = 100  # ثانية — أعلى قليلاً من timeout=90 الممرَّر داخلياً كسقف أمان إضافي
+_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ai_call")
+
+
+def _call_with_hard_timeout(fn, *args, _hard_timeout=_HARD_CALL_TIMEOUT, **kwargs):
+    """
+    ينفّذ fn في خيط منفصل ويفرض سقفاً زمنياً صارماً فعلياً على الانتظار،
+    بغض النظر عما إذا كانت fn نفسها (أو أي مكتبة تستخدمها داخلياً) تحترم
+    أي معامل timeout داخلي أم لا. يرفع TimeoutError فوراً عند تجاوز السقف.
+    ⚠️ اسم المعامل هنا "_hard_timeout" (لا "timeout") عمداً لتجنّب أي تضارب
+    مع معامل "timeout" الأصلي المُمرَّر إلى fn نفسها عبر **kwargs (الخاص
+    بمكتبة g4f الداخلية، وهو معامل مختلف تماماً لا نعتمد عليه هنا).
+    """
+    future = _executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=_hard_timeout)
+    except _FutureTimeoutError:
+        raise TimeoutError(f"تجاوز الاستدعاء السقف الزمني الصارم ({_hard_timeout}ث) دون أي رد — تم التخلي عنه وتجاوزه")
 
 # ترتيب النماذج من الأسرع/الأكثر استقراراً إلى الأبطأ (تبديل تلقائي عند الفشل)
 MODEL_CHAIN = [
@@ -109,7 +140,8 @@ def complete(prompt: str, system: str = "", max_tokens: int = 4500,
         for attempt in range(retries_per_model):
             try:
                 t0 = time.time()
-                resp = _client.chat.completions.create(
+                resp = _call_with_hard_timeout(
+                    _client.chat.completions.create,
                     model=model,
                     messages=messages,
                     max_tokens=max_tokens,
@@ -142,12 +174,14 @@ def complete(prompt: str, system: str = "", max_tokens: int = 4500,
         try:
             t0 = time.time()
             fb_client = Client(provider=provider_cls)
-            resp = fb_client.chat.completions.create(
+            resp = _call_with_hard_timeout(
+                fb_client.chat.completions.create,
                 model="",
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout=60,
+                _hard_timeout=70,
             )
             content = resp.choices[0].message.content or ""
             elapsed = time.time() - t0
