@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import secrets
 import threading
 import uuid
 from functools import wraps
@@ -44,6 +45,23 @@ app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 init_db()
 
 # ══════════════════════════════════════════════════════════════
+# مصادقة بالرمز (Bearer Token) — لعملاء تطبيق Flutter (ويب/أندرويد)
+# تعمل جنباً إلى جنب مع مصادقة الجلسة (Cookie) الخاصة بواجهة الويب القديمة،
+# لتجنّب أي مشاكل كوكيز عبر النطاقات (CORS/cross-origin) على منصّة الويب
+# ولأن عميل http على أندرويد لا يخزّن الكوكيز تلقائياً بين الطلبات.
+# ══════════════════════════════════════════════════════════════
+TOKENS = {}  # token -> username
+TOKENS_LOCK = threading.Lock()
+
+
+def _extract_bearer_token():
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
 # إدارة المهام غير المتزامنة (Background Jobs) لتتبع التقدم الحقيقي
 # ══════════════════════════════════════════════════════════════
 JOBS = {}
@@ -74,9 +92,14 @@ def _run_production_job(job_id, topic, duration, style, voice, audio, generate_v
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("logged_in"):
-            return jsonify({"error": "يجب تسجيل الدخول"}), 401
-        return f(*args, **kwargs)
+        if session.get("logged_in"):
+            return f(*args, **kwargs)
+        token = _extract_bearer_token()
+        if token:
+            with TOKENS_LOCK:
+                if token in TOKENS:
+                    return f(*args, **kwargs)
+        return jsonify({"error": "يجب تسجيل الدخول"}), 401
     return decorated
 
 
@@ -121,12 +144,19 @@ def api_login():
     if db_verify_user(username, password):
         session["logged_in"] = True
         session["username"] = username
-        return jsonify({"success": True, "message": "تم تسجيل الدخول بنجاح"})
+        token = secrets.token_urlsafe(32)
+        with TOKENS_LOCK:
+            TOKENS[token] = username
+        return jsonify({"success": True, "message": "تم تسجيل الدخول بنجاح", "token": token})
     return jsonify({"success": False, "error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
 
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
+    token = _extract_bearer_token()
+    if token:
+        with TOKENS_LOCK:
+            TOKENS.pop(token, None)
     session.clear()
     return jsonify({"success": True, "message": "تم تسجيل الخروج"})
 
