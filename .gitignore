@@ -25,3 +25,13 @@ venv/
 .vscode/
 .idea/
 backend/output/
+
+# --- Flutter/Dart/Pub ---
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+.metadata
+*.iml
