@@ -1,0 +1,68 @@
+name: Build Signed Release APK
+
+# يعمل هذا الملف تلقائياً عند الرفع لفرع main، أو يدوياً من تبويب Actions
+# على GitHub (زر "Run workflow"). الناتج: ملف APK جاهز للتثبيت مباشرة
+# على الهاتف، يظهر كـ "Artifact" قابل للتحميل من صفحة التشغيل بعد اكتماله.
+#
+# ─── إعداد لازم مرة واحدة فقط قبل أول تشغيل ───
+# من إعدادات المستودع على GitHub: Settings → Secrets and variables →
+# Actions → New repository secret، أضف الأربعة أسرار التالية:
+#
+#   ANDROID_KEYSTORE_BASE64   → ناتج الأمر: base64 -w0 android/release-key.jks
+#   ANDROID_STORE_PASSWORD    → قيمة storePassword من android/key.properties
+#   ANDROID_KEY_PASSWORD      → قيمة keyPassword من android/key.properties
+#   ANDROID_KEY_ALIAS         → قيمة keyAlias من android/key.properties
+#
+# نفّذ أمر base64 على جهازك (macOS: بدون -w0، استخدم: base64 -i android/release-key.jks)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: استنساخ المستودع
+        uses: actions/checkout@v4
+
+      - name: تجهيز Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: تجهيز Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: فك ترميز مفتاح التوقيع من الأسرار
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release-key.jks
+
+      - name: كتابة key.properties من الأسرار
+        run: |
+          cat > android/key.properties << EOF
+          storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storeFile=app/release-key.jks
+          EOF
+
+      - name: تحميل حزم Flutter
+        run: flutter pub get
+
+      - name: بناء APK موقّع (release)
+        run: flutter build apk --release
+
+      - name: رفع الملف الناتج
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentary-genius-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30

@@ -2,20 +2,46 @@
 # -*- coding: utf-8 -*-
 """
 طبقة قاعدة البيانات — SQLite
-نظام إنتاج الوثائقيات الذكي v4.0 (نسخة مجانية بالكامل بدون مفاتيح API)
+نظام إنتاج الوثائقيات الذكي v4.1 (نسخة مجانية بالكامل بدون مفاتيح API)
+
+التحديثات في v4.1:
+- تجزئة كلمات المرور أصبحت PBKDF2-SHA256 مع "ملح" (salt) عبر werkzeug،
+  بدل SHA-256 الخام غير المُملَّح. يوجد ترقية تلقائية شفافة لأي حساب قديم
+  عند أول تسجيل دخول ناجح بالنظام القديم.
+- جدول settings (key/value) لتخزين بيانات صفحة فيسبوك (Page ID + Access Token)
+  بدل كتابتها داخل الكود مباشرة.
+- أعمدة نشر فيسبوك على جدول الحلقات لتتبع حالة النشر.
 """
 import json
+import os
+import secrets
 import sqlite3
-import hashlib
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "production.db"
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# يمكن ضبط DB_PATH عبر متغيّر بيئة (مفيد عند تركيب Docker volume في مسار
+# ثابت خارج مجلد الكود، حتى لا تُفقد البيانات عند إعادة بناء الحاوية).
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "production.db")))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# هاش قديم (SHA-256 خام) = 64 حرف hex بدون أي فاصل "$".
+# هاش werkzeug الحديث دائماً بصيغة "method$salt$hash" ويحوي "$".
+_LEGACY_HASH_LEN = 64
 
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
+
+
+def _ensure_column(c, table, column, coltype):
+    """يضيف عموداً لجدول موجود إن لم يكن موجوداً بالفعل (ترقية آمنة لقواعد بيانات قديمة)."""
+    c.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in c.fetchall()}
+    if column not in existing:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
 def init_db():
@@ -58,20 +84,112 @@ def init_db():
         used INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
-    # مستخدم افتراضي (يمكن تغييره من قاعدة البيانات لاحقاً)
-    default_pass = hashlib.sha256("horizon2024".encode()).hexdigest()
-    c.execute("INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
-              ("basel", default_pass))
+    c.execute("""CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
+
+    # ترقية آمنة لقواعد بيانات منشأة بنسخة أقدم: أعمدة تتبّع النشر على فيسبوك
+    _ensure_column(c, "episodes", "fb_post_id", "TEXT")
+    _ensure_column(c, "episodes", "fb_published_at", "TEXT")
+    _ensure_column(c, "episodes", "fb_publish_error", "TEXT")
+
+    # مستخدم افتراضي بكلمة مرور عشوائية تُطبع في السجلّات مرة واحدة فقط.
+    # لا تُستخدم كلمة مرور ثابتة معروفة كي لا يبقى أي تنصيب بكلمة سرّ متوقَّعة.
+    c.execute("SELECT COUNT(*) FROM users")
+    if c.fetchone()[0] == 0:
+        random_pass = secrets.token_urlsafe(9)
+        c.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            ("basel", generate_password_hash(random_pass)),
+        )
+        print("=" * 64)
+        print("تم إنشاء حساب أول مرة — احفظ هذه البيانات الآن:")
+        print(f"  اسم المستخدم : basel")
+        print(f"  كلمة المرور  : {random_pass}")
+        print("(لن تُطبع هذه الرسالة مرة أخرى — غيّرها فوراً من الإعدادات)")
+        print("=" * 64)
+
     conn.commit()
     conn.close()
 
 
 def db_verify_user(username, password):
     conn = get_conn()
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    pass_hash = hashlib.sha256(password.encode()).hexdigest()
-    c.execute("SELECT 1 FROM users WHERE username = ? AND password_hash = ?", (username, pass_hash))
-    result = c.fetchone() is not None
+    c.execute("SELECT * FROM users WHERE username = ?", (username,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    stored = row["password_hash"]
+    ok = False
+
+    if len(stored) == _LEGACY_HASH_LEN and "$" not in stored:
+        # هاش قديم (SHA-256 خام بدون ملح) — تحقق باستخدامه، ثم رقِّه فوراً.
+        import hashlib
+        ok = hashlib.sha256(password.encode()).hexdigest() == stored
+        if ok:
+            c.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (generate_password_hash(password), row["id"]),
+            )
+            conn.commit()
+    else:
+        ok = check_password_hash(stored, password)
+
+    conn.close()
+    return ok
+
+
+def db_change_password(username, new_password):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET password_hash = ? WHERE username = ?",
+        (generate_password_hash(new_password), username),
+    )
+    changed = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+# ══════════════════════════════════════════════════════════════
+# الإعدادات (key/value) — تُستخدم لتخزين بيانات صفحة فيسبوك وغيرها
+# بدل كتابتها داخل الكود المصدري.
+# ══════════════════════════════════════════════════════════════
+def db_get_setting(key, default=None):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+
+def db_set_setting(key, value):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_get_settings_dict(keys):
+    conn = get_conn()
+    c = conn.cursor()
+    q_marks = ",".join("?" * len(keys))
+    c.execute(f"SELECT key, value FROM settings WHERE key IN ({q_marks})", keys)
+    result = {k: None for k in keys}
+    for k, v in c.fetchall():
+        result[k] = v
     conn.close()
     return result
 
@@ -124,6 +242,25 @@ def db_delete_episode(ep_id):
     conn = get_conn()
     c = conn.cursor()
     c.execute("DELETE FROM episodes WHERE id = ?", (ep_id,))
+    conn.commit()
+    conn.close()
+
+
+def db_set_episode_published(ep_id, fb_post_id=None, error=None):
+    """يسجّل نتيجة محاولة النشر على فيسبوك (نجاح بمعرّف المنشور، أو فشل برسالة الخطأ)."""
+    from datetime import datetime
+    conn = get_conn()
+    c = conn.cursor()
+    if fb_post_id:
+        c.execute(
+            "UPDATE episodes SET fb_post_id = ?, fb_published_at = ?, fb_publish_error = NULL WHERE id = ?",
+            (fb_post_id, datetime.now().isoformat(timespec="seconds"), ep_id),
+        )
+    else:
+        c.execute(
+            "UPDATE episodes SET fb_publish_error = ? WHERE id = ?",
+            (error, ep_id),
+        )
     conn.commit()
     conn.close()
 

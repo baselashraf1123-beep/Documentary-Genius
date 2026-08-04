@@ -22,6 +22,9 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
   EpisodeDetail? _detail;
   String? _error;
   bool _loading = false;
+  bool _publishing = false;
+  String? _publishMessage;
+  bool _publishOk = false;
 
   @override
   void initState() {
@@ -48,6 +51,33 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
       setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _publish() async {
+    final detail = _detail;
+    if (detail?.id == null) return;
+    setState(() {
+      _publishing = true;
+      _publishMessage = null;
+    });
+    final app = context.read<AppProvider>();
+    try {
+      await app.api.publishToFacebook(detail!.id!);
+      if (!mounted) return;
+      setState(() {
+        _publishOk = true;
+        _publishMessage = 'تم النشر على صفحة فيسبوك بنجاح';
+      });
+      await _load(); // إعادة تحميل لعرض حالة النشر المحدَّثة من الخادم
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _publishOk = false;
+        _publishMessage = 'فشل النشر: $e';
+      });
+    } finally {
+      if (mounted) setState(() => _publishing = false);
     }
   }
 
@@ -120,6 +150,9 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
             },
           ),
         const SizedBox(height: 20),
+        if (detail.videoFile != null && detail.id != null)
+          _publishSection(detail),
+        const SizedBox(height: 20),
         _infoChips(detail),
         const SizedBox(height: 20),
         _section(
@@ -168,6 +201,74 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
           ),
         ],
         const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _publishSection(EpisodeDetail detail) {
+    if (detail.isPublishedToFacebook) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.success.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle, color: AppColors.success),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                detail.fbPublishedAt != null
+                    ? 'نُشر على فيسبوك بتاريخ ${detail.fbPublishedAt}'
+                    : 'منشور على صفحة فيسبوك',
+                style: const TextStyle(color: AppColors.success),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ElevatedButton.icon(
+          onPressed: _publishing ? null : _publish,
+          icon: _publishing
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppColors.navy,
+                  ),
+                )
+              : const Icon(Icons.facebook),
+          label: Text(_publishing ? 'جارِ النشر...' : 'نشر على صفحة فيسبوك'),
+        ),
+        if (_publishMessage != null) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: (_publishOk ? AppColors.success : AppColors.danger)
+                  .withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              _publishMessage!,
+              style: TextStyle(
+                color: _publishOk ? AppColors.success : AppColors.danger,
+              ),
+            ),
+          ),
+        ] else if (detail.fbPublishError != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            'آخر محاولة نشر فشلت: ${detail.fbPublishError}',
+            style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
+          ),
+        ],
       ],
     );
   }

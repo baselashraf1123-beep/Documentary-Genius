@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/app_status.dart';
 import '../models/episode.dart';
+import '../models/facebook_settings.dart';
 import '../models/idea.dart';
 import '../models/job_status.dart';
 import 'settings_service.dart';
@@ -94,6 +95,24 @@ class ApiService {
     } catch (_) {
       // نتجاهل أي خطأ شبكة أثناء تسجيل الخروج — سيتم مسح الرمز محلياً بأي حال
     }
+  }
+
+  Future<void> changePassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final uri = await _uri('/api/change-password');
+    final resp = await _client
+        .post(
+          uri,
+          headers: await _headers(),
+          body: jsonEncode({
+            'current_password': currentPassword,
+            'new_password': newPassword,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    _decodeOrThrow(resp);
   }
 
   // ══════════════════════════════════════════════
@@ -222,6 +241,57 @@ class ApiService {
         .delete(uri, headers: await _headers())
         .timeout(const Duration(seconds: 15));
     _decodeOrThrow(resp);
+  }
+
+  /// ينشر فيديو حلقة مُنتَجة مباشرة على صفحة فيسبوك المضبوطة في الإعدادات.
+  /// يرجع معرّف المنشور عند النجاح.
+  Future<String> publishToFacebook(int episodeId) async {
+    final uri = await _uri('/api/packages/$episodeId/publish');
+    final resp = await _client
+        .post(uri, headers: await _headers())
+        .timeout(const Duration(seconds: 300)); // رفع الفيديو قد يستغرق وقتاً
+    final body = _decodeOrThrow(resp) as Map<String, dynamic>;
+    return body['post_id'] as String? ?? '';
+  }
+
+  // ══════════════════════════════════════════════
+  // إعدادات صفحة فيسبوك
+  // ══════════════════════════════════════════════
+  Future<FacebookSettings> getFacebookSettings() async {
+    final uri = await _uri('/api/settings/facebook');
+    final resp = await _client
+        .get(uri, headers: await _headers())
+        .timeout(const Duration(seconds: 15));
+    final body = _decodeOrThrow(resp) as Map<String, dynamic>;
+    return FacebookSettings.fromJson(body);
+  }
+
+  Future<void> saveFacebookSettings({
+    String? pageId,
+    String? accessToken,
+  }) async {
+    final uri = await _uri('/api/settings/facebook');
+    final resp = await _client
+        .post(
+          uri,
+          headers: await _headers(),
+          body: jsonEncode({
+            if (pageId != null) 'page_id': pageId,
+            if (accessToken != null) 'access_token': accessToken,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    _decodeOrThrow(resp);
+  }
+
+  /// يتحقق من صلاحية إعدادات فيسبوك المحفوظة، ويرجع اسم الصفحة عند النجاح.
+  Future<String> testFacebookSettings() async {
+    final uri = await _uri('/api/settings/facebook/test');
+    final resp = await _client
+        .post(uri, headers: await _headers())
+        .timeout(const Duration(seconds: 20));
+    final body = _decodeOrThrow(resp) as Map<String, dynamic>;
+    return body['page_name'] as String? ?? '';
   }
 
   // ══════════════════════════════════════════════

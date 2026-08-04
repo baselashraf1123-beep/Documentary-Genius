@@ -8,6 +8,10 @@ class EpisodeSummary {
   final String style;
   final bool hasAudio;
   final bool hasVideo;
+  final String? fbPostId;
+  final String? fbPublishedAt;
+
+  bool get isPublishedToFacebook => fbPostId != null && fbPostId!.isNotEmpty;
 
   EpisodeSummary({
     required this.id,
@@ -18,6 +22,8 @@ class EpisodeSummary {
     required this.style,
     required this.hasAudio,
     required this.hasVideo,
+    this.fbPostId,
+    this.fbPublishedAt,
   });
 
   factory EpisodeSummary.fromJson(Map<String, dynamic> json) {
@@ -32,6 +38,8 @@ class EpisodeSummary {
       style: json['style'] as String? ?? '',
       hasAudio: json['has_audio'] as bool? ?? false,
       hasVideo: json['has_video'] as bool? ?? false,
+      fbPostId: json['fb_post_id'] as String?,
+      fbPublishedAt: json['fb_published_at'] as String?,
     );
   }
 }
@@ -54,6 +62,9 @@ class EpisodeDetail {
   final String? thumbnailFile;
   final List<String> images;
   final int imagesCount;
+  final String? fbPostId;
+  final String? fbPublishedAt;
+  final String? fbPublishError;
 
   EpisodeDetail({
     this.id,
@@ -72,10 +83,14 @@ class EpisodeDetail {
     this.thumbnailFile,
     required this.images,
     required this.imagesCount,
+    this.fbPostId,
+    this.fbPublishedAt,
+    this.fbPublishError,
   });
 
   String get fullScript => script['full_script'] as String? ?? '';
   String get title => script['title'] as String? ?? topic;
+  bool get isPublishedToFacebook => fbPostId != null && fbPostId!.isNotEmpty;
 
   factory EpisodeDetail.fromJson(Map<String, dynamic> json) {
     final rawId = json['episode_id'] ?? json['id'];
@@ -97,6 +112,9 @@ class EpisodeDetail {
       images:
           (json['images'] as List?)?.map((e) => e.toString()).toList() ?? [],
       imagesCount: (json['images_count'] as num?)?.toInt() ?? 0,
+      fbPostId: json['fb_post_id'] as String?,
+      fbPublishedAt: json['fb_published_at'] as String?,
+      fbPublishError: json['fb_publish_error'] as String?,
     );
   }
 }

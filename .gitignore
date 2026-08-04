@@ -2,6 +2,12 @@
 cookies.txt
 *.db
 production.db
+backend/.env
+
+# --- Android signing secrets (NEVER commit these) ---
+android/key.properties
+*.jks
+*.keystore
 
 # --- Logs ---
 server.log
